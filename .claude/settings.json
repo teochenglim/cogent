@@ -39,7 +39,8 @@
       "Bash(python3 -c \"import json,sys; r=json.load\\(sys.stdin\\); print\\(r['tag_name']\\)\")",
       "Bash(grep -v \"^\\\\-\\\\-$\")",
       "Bash(docker run *)",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "Bash(grep -v \"^\\\\s*$\")"
     ],
     "additionalDirectories": [
       "/Users/chenglim.teo/code/cogent/.claude"
