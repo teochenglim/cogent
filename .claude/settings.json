@@ -43,7 +43,8 @@
       "Bash(grep -v \"^\\\\s*$\")",
       "Bash(grep -v \"MiB\\\\|p/s\\\\|ETA\\\\|Downloading\\\\|INFO\\\\|Pulling\\\\|complete\\\\|Pull\\\\|Digest\\\\|Status\\\\|Downloaded\\\\|^\\\\s*$\")",
       "Bash(grep -v \"MiB\\\\|p/s\\\\|ETA\\\\|Pulling\\\\|complete\\\\|Pull\\\\|Digest\\\\|Status\\\\|Downloaded\\\\|^\\\\s*$\")",
-      "Bash(grep -v \"MiB\\\\|p/s\\\\|ETA\\\\|Downloading\\\\|Pulling\\\\|complete\\\\|Pull\\\\|Digest\\\\|Status\\\\|Downloaded\\\\|^\\\\s*$\")"
+      "Bash(grep -v \"MiB\\\\|p/s\\\\|ETA\\\\|Downloading\\\\|Pulling\\\\|complete\\\\|Pull\\\\|Digest\\\\|Status\\\\|Downloaded\\\\|^\\\\s*$\")",
+      "Bash(grep -v \"##\\\\[group\\\\]\\\\|##\\\\[end\\\\]\\\\|^$\")"
     ],
     "additionalDirectories": [
       "/Users/chenglim.teo/code/cogent/.claude"
