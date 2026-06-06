@@ -1,0 +1,887 @@
+= Cogent User Guide
+:toc: left
+:toc-title: Contents
+:toclevels: 3
+:sectnums:
+:icons: font
+:source-highlighter: rouge
+:rouge-style: github
+
+Cogent is a self-hosted, stream-first observability platform for distributed LLM agents.
+Every agent action emits one structured event to a Kafka-compatible queue.
+If the observability backend is unavailable, your agents keep running unaffected.
+
+== What Cogent does
+
+=== The problem it solves
+
+SaaS observability tools break down on large-scale agent workloads in three ways:
+
+* **Payload size.** Agent traces grow to gigabytes. Single spans can contain megabyte-scale prompts. Storing them inline in a database makes rows unpredictably large and queries slow.
+* **Synchronous coupling.** Most tools write observations synchronously. When the observability backend slows down or falls over, the agent slows down or errors.
+* **Eval and observability split.** Production observability and offline evaluation are treated as separate problems, requiring separate data pipelines, separate schemas, and separate tooling.
+
+Cogent addresses all three.
+
+=== How it works
+
+[source]
+----
+Python Agent ──► Redpanda ──► consumer-greptime ──► GreptimeDB (hot tier)
+               (one event      consumer-doris   ──► Doris (warm tier, FTS)
+                per action)    consumer-judge   ──► auto-scores via LLM
+                               consumer-alert   ──► webhook on threshold breach
+                     │
+               MinIO / S3 ◄── SDK offloads full payloads
+                     │
+                     └──────► server :8090 ── trace viewer + search + annotation
+----
+
+Agents call `span.log()` and return immediately.
+One Kafka message per agent action.
+All four consumers read from the same topic independently.
+The server binary embeds the entire UI — one binary, one port, no CDN.
+
+=== Storage design
+
+Cogent uses two database tiers:
+
+[cols="1,2,2"]
+|===
+| Tier | Database | What it stores
+
+| Hot
+| GreptimeDB
+| Metadata, token counts, costs, latency, eval scores, 500-char previews of prompts and completions. Small rows. Fast time-series queries. Real-time dashboards.
+
+| Warm
+| Apache Doris
+| Full prompt and completion text. Full-text search via native inverted index. Source of truth for human review, governance, and batch eval.
+|===
+
+Full payload content (prompts, completions, tool inputs/outputs) is *always* uploaded to MinIO/S3 in the background.
+DB rows never contain raw content — they contain only a 500-character preview and an S3 reference key.
+The UI lazy-loads the full payload from S3 on click.
+
+This design handles Phil Hetzel's (Braintrust) observed production numbers: 1 GB traces and 20 MB single spans without DB row bloat.
+
+== Prerequisites
+
+* Docker 24+ and Docker Compose v2
+* Go 1.22+ (to build from source; not needed if using pre-built binaries)
+* Python 3.11+
+* An OpenAI-compatible LLM endpoint for the judge (Ollama on localhost is the default)
+
+== Installation
+
+=== Full stack with Docker Compose
+
+[source,bash]
+----
+git clone https://github.com/cogent/cogent
+cd cogent
+cp .env.example .env          # <1>
+make up                        # <2>
+----
+<1> Defaults work for local dev. Edit `.env` to point at external services.
+<2> Starts Redpanda, MinIO, GreptimeDB, Doris, Grafana, all four consumers, and the API server.
+
+Wait about 30 seconds for Doris to finish initialising, then:
+
+* **Trace UI:** http://localhost:8090
+* **Grafana dashboards:** http://localhost:3000 (admin / admin)
+* **Redpanda Console:** http://localhost:8080
+* **MinIO Console:** http://localhost:9001 (minioadmin / minioadmin)
+
+=== Python SDK
+
+[source,bash]
+----
+pip install -e ".[sdk]"
+----
+
+For development (includes test dependencies):
+
+[source,bash]
+----
+pip install -e ".[sdk,dev]"
+----
+
+=== Building Go binaries from source
+
+[source,bash]
+----
+make build-go
+----
+
+This builds six binaries into `./bin/`:
+
+[cols="1,3"]
+|===
+| Binary | Purpose
+
+| `consumer-greptime`
+| Kafka consumer — writes metadata and previews to GreptimeDB
+
+| `consumer-doris`
+| Kafka consumer — writes full content to Doris (with S3 hydration)
+
+| `consumer-judge`
+| Kafka consumer — scores `llm_call` events using an LLM judge
+
+| `consumer-alerting`
+| Kafka consumer — fires webhooks on runaway loops, cost spikes, oversized payloads
+
+| `server`
+| REST API + embedded trace viewer and annotation UI
+
+| `eval`
+| Batch eval CLI — re-scores historical traces from Doris
+|===
+
+== Instrumenting your agent
+
+=== Setting up telemetry
+
+Create one `AgentTelemetry` instance per process. It is thread-safe and reusable.
+
+[source,python]
+----
+import os
+from cogent.sdk import AgentTelemetry, PayloadOffloader
+
+offloader = PayloadOffloader(
+    endpoint=os.getenv("MINIO_ENDPOINT", "localhost:9000"),
+    bucket=os.getenv("MINIO_BUCKET", "cogent-payloads"),
+    access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+    secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
+)
+
+tel = AgentTelemetry(
+    bootstrap_servers=os.getenv("BOOTSTRAP_SERVERS", "localhost:9092"),
+    offloader=offloader,
+    service_name="my-service",
+    environment="production",
+)
+----
+
+TIP: Pass `endpoint=None` to `PayloadOffloader` for no-op mode (local dev without MinIO). Previews still work; S3 uploads are skipped silently.
+
+=== Recording a span
+
+Use `tel.span()` as a context manager.
+Call `span.log()` with the fields you want to record.
+
+[source,python]
+----
+with tel.span("llm_call", agent_name="my-agent") as span:
+    response = llm.complete(prompt)
+    span.log(
+        prompt=prompt,
+        completion=response.text,
+        model="gpt-4o",
+        provider="openai",
+        input_tokens=response.usage.prompt_tokens,
+        output_tokens=response.usage.completion_tokens,
+        cost_usd=0.003,
+        finish_reason="stop",
+    )
+----
+
+If `span.log()` is never called, the span auto-emits on exit with whatever fields were provided to `tel.span()`.
+If the context manager exits with an exception, `tool_error` is set to the exception message and the exception is re-raised.
+
+=== Nesting spans (multi-agent traces)
+
+Child spans automatically inherit `trace_id` from the enclosing parent span via `contextvars`.
+No manual ID threading required.
+
+[source,python]
+----
+with tel.span("llm_call", agent_name="orchestrator") as parent:
+    parent.log(
+        prompt="Plan a research task.",
+        completion="Step 1: search. Step 2: summarise.",
+        model="claude-sonnet-4-6",
+        provider="anthropic",
+        input_tokens=8,
+        output_tokens=12,
+        cost_usd=0.00005,
+    )
+
+    # child automatically inherits trace_id and sets parent_span_id
+    with tel.span("tool_call", agent_name="researcher") as child:
+        result = search_tool(query)
+        child.log(
+            tool_name="web_search",
+            tool_input=query,
+            tool_output=result,
+        )
+----
+
+=== Recording a tool call
+
+[source,python]
+----
+with tel.span("tool_call", agent_name="my-agent") as span:
+    try:
+        result = run_tool(input_data)
+        span.log(
+            tool_name="database_query",
+            tool_input=input_data,
+            tool_output=result,
+        )
+    except Exception as e:
+        span.log(tool_name="database_query", tool_error=str(e))
+        raise
+----
+
+=== The @observe decorator
+
+For functions where you want automatic instrumentation:
+
+[source,python]
+----
+from cogent.sdk import observe, set_telemetry
+
+set_telemetry(tel)  # register the global telemetry instance
+
+@observe(operation="llm_call", agent_name="summarizer")
+async def summarize(text: str) -> str:
+    return await llm.complete(f"Summarize: {text}")
+    # return value is automatically recorded as completion
+----
+
+The decorator works on both sync and async functions.
+If the function raises, `tool_error` is set and the exception is re-raised.
+
+=== Event schema reference
+
+Every event has these required fields — set automatically by the SDK:
+
+[cols="1,1,3"]
+|===
+| Field | Type | Description
+
+| `trace_id`
+| `str`
+| UUID4. Shared across all spans in one agent run.
+
+| `span_id`
+| `str`
+| UUID4. Unique per action.
+
+| `parent_span_id`
+| `str \| None`
+| Set automatically from the enclosing span's context.
+
+| `start_time`
+| `float`
+| Unix timestamp with microsecond precision.
+
+| `end_time`
+| `float`
+| Set on `__exit__`.
+
+| `duration_ms`
+| `float`
+| Calculated on `__exit__`.
+
+| `agent_name`
+| `str`
+| Identifies which agent produced this span.
+
+| `operation`
+| `str`
+| One of: `llm_call`, `tool_call`, `retrieval`, `handoff`, `evaluation`, `human_annotation`, `custom`
+
+| `service_name`
+| `str`
+| From `AgentTelemetry(service_name=...)`.
+
+| `environment`
+| `str`
+| From `AgentTelemetry(environment=...)`.
+|===
+
+Optional fields you can pass to `span.log()`:
+
+[cols="1,1,3"]
+|===
+| Field | Type | Description
+
+| `prompt`
+| `str`
+| LLM input. Split to preview + S3 automatically.
+
+| `completion`
+| `str`
+| LLM output. Split to preview + S3 automatically.
+
+| `tool_input`
+| `str`
+| Tool call input. Split to preview + S3 automatically.
+
+| `tool_output`
+| `str`
+| Tool call output. Split to preview + S3 automatically.
+
+| `model`
+| `str`
+| e.g. `gpt-4o`, `claude-sonnet-4-6`
+
+| `provider`
+| `str`
+| e.g. `openai`, `anthropic`
+
+| `input_tokens`
+| `int`
+| Prompt token count.
+
+| `output_tokens`
+| `int`
+| Completion token count.
+
+| `cost_usd`
+| `float`
+| Cost in USD for this span.
+
+| `finish_reason`
+| `str`
+| e.g. `stop`, `length`, `tool_calls`
+
+| `tool_name`
+| `str`
+| Name of the tool invoked.
+
+| `tool_error`
+| `str`
+| Error message if the tool or LLM call failed.
+
+| `metadata`
+| `dict`
+| Arbitrary key-value pairs.
+|===
+
+NOTE: The raw `prompt`, `completion`, `tool_input`, and `tool_output` fields are *not* stored in the database. The SDK splits them into `_preview` (500 chars), `_ref` (S3 key), and `_size_bytes` fields before emitting. This is unconditional — there is no threshold.
+
+== Running the examples
+
+[source,bash]
+----
+# Single LLM call
+python examples/single_agent.py
+
+# Parent orchestrator + child researcher spans
+python examples/multi_agent.py
+----
+
+Both examples print the emitted span IDs.
+Open http://localhost:8090 to see the traces in the UI.
+
+== Deployment
+
+=== Docker Compose reference
+
+`deploy/docker-compose.yml` defines the full local stack.
+The stack starts in dependency order: Redpanda → MinIO → GreptimeDB → Doris → init scripts → consumers → server.
+
+[source,bash]
+----
+make up        # start all services in background
+make down      # stop and remove containers
+make logs      # tail all container logs
+----
+
+=== Environment configuration
+
+All services read configuration from environment variables.
+Copy `.env.example` to `.env` and edit as needed.
+
+==== Transport
+
+[cols="1,1,2"]
+|===
+| Variable | Default | Description
+
+| `BOOTSTRAP_SERVERS`
+| `localhost:19092`
+| Kafka / Redpanda bootstrap servers (host-native clients use port 19092; Docker services use `redpanda:9092`)
+
+| `TOPIC`
+| `cogent-telemetry`
+| Kafka topic name
+|===
+
+==== Object storage
+
+[cols="1,1,2"]
+|===
+| Variable | Default | Description
+
+| `MINIO_ENDPOINT`
+| `localhost:9000`
+| MinIO or S3-compatible endpoint
+
+| `MINIO_ACCESS_KEY`
+| `minioadmin`
+| Access key
+
+| `MINIO_SECRET_KEY`
+| `minioadmin`
+| Secret key
+
+| `MINIO_BUCKET`
+| `cogent-payloads`
+| Bucket for payload storage
+
+| `MINIO_SECURE`
+| `false`
+| Set `true` for TLS
+|===
+
+==== GreptimeDB (hot tier)
+
+[cols="1,1,2"]
+|===
+| Variable | Default | Description
+
+| `GREPTIME_HOST`
+| `localhost`
+| GreptimeDB host
+
+| `GREPTIME_PORT`
+| `4002`
+| MySQL protocol port
+
+| `GREPTIME_DATABASE`
+| `public`
+| Database name
+|===
+
+==== Doris (warm tier)
+
+[cols="1,1,2"]
+|===
+| Variable | Default | Description
+
+| `DORIS_FE_HOST`
+| `localhost`
+| Doris FE host
+
+| `DORIS_FE_HTTP_PORT`
+| `8030`
+| Stream Load HTTP port
+
+| `DORIS_MYSQL_PORT`
+| `9030`
+| MySQL protocol port
+
+| `DORIS_USER`
+| `root`
+| MySQL user
+
+| `DORIS_DATABASE`
+| `cogent`
+| Database name
+|===
+
+==== Server
+
+[cols="1,1,2"]
+|===
+| Variable | Default | Description
+
+| `SERVER_PORT`
+| `8090`
+| UI and API port
+|===
+
+==== Alerting
+
+[cols="1,1,2"]
+|===
+| Variable | Default | Description
+
+| `ALERT_MAX_SPANS_PER_TRACE`
+| `200`
+| Runaway loop threshold (spans per trace per window)
+
+| `ALERT_COST_BUDGET_USD`
+| `1.0`
+| Cost spike threshold (cumulative per agent per window, USD)
+
+| `ALERT_MAX_SPAN_BYTES`
+| `52428800` (50 MB)
+| Payload size alert threshold (bytes per span)
+
+| `ALERT_WINDOW_SECONDS`
+| `60`
+| Rolling window duration for runaway and cost alerts
+
+| `ALERT_WEBHOOK_URL`
+| _(none)_
+| POST target for alert payloads (JSON)
+|===
+
+=== CLI flag overrides
+
+Every service accepts CLI flags that override environment variables.
+The full precedence chain is: *CLI flag > environment variable > built-in default*.
+
+This lets you test new settings without modifying `.env` or redeploying.
+
+[source,bash]
+----
+./bin/consumer-judge \
+  --judge-model gpt-4o \
+  --judge-base-url https://api.openai.com/v1 \
+  --judge-api-key sk-... \
+  --judge-rps 10
+
+./bin/server --port 9090
+----
+
+=== Production upgrade paths
+
+[cols="1,1,2"]
+|===
+| Component | Local default | Production swap
+
+| Transport
+| Redpanda
+| AutoMQ — change `BOOTSTRAP_SERVERS` only. AutoMQ is S3-native and Kafka-compatible.
+
+| Object store
+| MinIO
+| AWS S3 / Google Cloud Storage — change `MINIO_ENDPOINT` and credentials.
+
+| Hot tier
+| GreptimeDB standalone
+| GreptimeDB cluster — same config, multiple nodes.
+
+| Warm tier
+| Single Doris node
+| Doris cluster — same MySQL / HTTP endpoints, distributed backend.
+|===
+
+== The judge
+
+=== How it works
+
+`consumer-judge` is a Kafka consumer in the `cogent-judge` consumer group.
+It reads every event, skips anything that is not an `llm_call` or already has an `eval_score`, fetches the full prompt and completion from S3, sends them to an LLM, and parses the JSON response.
+
+The result is emitted back to Kafka as a new event with `operation = "evaluation"` and `eval_source = "realtime"`, which the other consumers pick up and store.
+
+=== Default prompt
+
+The embedded default prompt scores on three dimensions:
+
+[cols="1,1,3"]
+|===
+| Dimension | Weight | What it measures
+
+| Relevance
+| 0.3
+| Does the completion address what the prompt asked?
+
+| Faithfulness
+| 0.4
+| Is the completion grounded in the provided context?
+
+| Safety
+| 0.3
+| Does the completion avoid harmful or policy-violating content?
+|===
+
+IMPORTANT: The default prompt is a *placeholder*. Replace it with a rubric tuned to your domain before using scores to make decisions. See the next section.
+
+=== Writing a domain rubric
+
+Create a text file with your scoring instructions.
+The prompt must instruct the LLM to return only a JSON object with these keys:
+
+[source,json]
+----
+{
+  "relevance": 0.0,
+  "faithfulness": 0.0,
+  "safety": 0.0,
+  "overall": 0.0,
+  "label": "good",
+  "reason": "..."
+}
+----
+
+* `relevance`, `faithfulness`, `safety`, `overall`: floats from 0.0 to 1.0
+* `label`: one of `good`, `acceptable`, `bad`
+* `reason`: one sentence of justification (stored in Doris, visible in the annotation UI)
+
+Your prompt receives two template variables that are filled at runtime:
+
+* `{{PROMPT}}` — the full prompt text fetched from S3
+* `{{COMPLETION}}` — the full completion text fetched from S3
+
+Start your prompt file with the context your domain requires, then end with the scoring instruction and a JSON-only output constraint.
+
+Example for a customer support agent:
+
+[source,text]
+----
+You are evaluating a customer support agent's responses.
+Score the following exchange:
+
+CUSTOMER MESSAGE:
+{{PROMPT}}
+
+AGENT RESPONSE:
+{{COMPLETION}}
+
+Score on:
+- resolution (0.4): Did the response fully resolve the customer's issue?
+- tone (0.3): Was the response professional and empathetic?
+- accuracy (0.3): Was the information factually correct?
+
+Return ONLY a JSON object. No explanation outside the JSON.
+{"resolution": ..., "faithfulness": ..., "safety": ..., "overall": ...,
+ "label": "good|acceptable|bad", "reason": "one sentence"}
+----
+
+NOTE: The JSON keys `faithfulness` and `safety` are required by the schema even if your rubric uses different dimensions. Map your internal dimensions to the overall score and use those keys as proxies.
+
+=== Switching the judge model
+
+All judge parameters can be changed without redeploying:
+
+[source,bash]
+----
+# Use a local Ollama model
+./bin/consumer-judge --judge-model mistral
+
+# Use OpenAI
+./bin/consumer-judge \
+  --judge-base-url https://api.openai.com/v1 \
+  --judge-model gpt-4o-mini \
+  --judge-api-key sk-...
+
+# Use a custom endpoint (vLLM, Together, Groq, etc.)
+./bin/consumer-judge \
+  --judge-base-url https://api.groq.com/openai/v1 \
+  --judge-model llama-3.1-70b-versatile \
+  --judge-api-key $GROQ_API_KEY \
+  --judge-rps 20
+
+# Load a domain prompt
+./bin/consumer-judge --judge-prompt-file /etc/cogent/prompts/support.txt
+----
+
+=== Batch eval
+
+Re-score historical traces from Doris without touching the live consumer:
+
+[source,bash]
+----
+# Preview what would be scored (no writes)
+./bin/eval \
+  --start 2025-01-01 \
+  --end 2025-01-31 \
+  --dry-run
+
+# Score all traces from the last 7 days
+make eval-dry    # shortcut for the above with auto dates
+
+# Score a specific agent only, 10% sample
+./bin/eval \
+  --start 2025-01-01 \
+  --end 2025-01-31 \
+  --agent-name my-agent \
+  --sample-rate 0.1
+
+# Score with a different model than the live judge
+./bin/eval \
+  --start 2025-01-01 \
+  --end 2025-01-31 \
+  --judge-model gpt-4o \
+  --judge-base-url https://api.openai.com/v1 \
+  --judge-api-key sk-...
+----
+
+Batch eval results are emitted to Kafka with `eval_source = "batch_eval"` so they are stored alongside realtime scores and distinguishable in queries.
+
+== Alerting
+
+Three alert conditions fire in real time, per event, with no pre-aggregation:
+
+[cols="1,2,2"]
+|===
+| Alert | Condition | Config variable
+
+| `runaway_loop`
+| A single trace accumulates more spans than the threshold within the rolling window.
+| `ALERT_MAX_SPANS_PER_TRACE` (default: 200)
+
+| `cost_spike`
+| A single agent's cumulative cost crosses the budget within the rolling window.
+| `ALERT_COST_BUDGET_USD` (default: $1.00)
+
+| `payload_size`
+| A single span's total payload bytes (prompt + completion + tool I/O) exceeds the threshold.
+| `ALERT_MAX_SPAN_BYTES` (default: 50 MB)
+|===
+
+When an alert fires, `consumer-alerting` logs a structured warning and, if `ALERT_WEBHOOK_URL` is set, POSTs a JSON payload to that URL asynchronously.
+
+Alert webhook payload example:
+
+[source,json]
+----
+{
+  "alert": "runaway_loop",
+  "trace_id": "...",
+  "agent_name": "my-agent",
+  "span_count": 201,
+  "threshold": 200,
+  "ts": "2025-01-15T14:32:00Z"
+}
+----
+
+== The UI
+
+Open http://localhost:8090 after `make up`.
+
+=== Trace list
+
+The home page (`/`) shows all recent traces. Filter by:
+
+* `agent_name` — narrow to one agent
+* `environment` — production vs. staging
+* `start` / `end` — Unix timestamp range
+* `limit` / `offset` — pagination
+
+Each row shows trace ID, agent name, span count, total cost, time, and the latest eval score.
+
+=== Trace view
+
+Click a trace to open the span waterfall (`/trace.html?id=...`).
+Spans are indented by depth (derived from `parent_span_id` links).
+Each span shows operation, duration, token counts, cost, and eval label badge.
+
+=== Span detail
+
+Click a span to open the detail view (`/span.html?id=...`).
+The prompt and completion previews are shown immediately.
+Click *Load full payload* to fetch the complete text from S3.
+Eval score, label, and reason are shown if the span has been scored.
+
+=== Annotation
+
+To submit a human annotation, open `/annotate.html?span_id=...&trace_id=...` or click *Annotate* on the span detail page.
+
+Fill in:
+
+* **Score** (0.0–1.0)
+* **Label** (`good`, `acceptable`, `bad`)
+* **Justification** (minimum 20 characters)
+
+The annotation is emitted as a new event (`operation = "human_annotation"`, `eval_source = "human_annotation"`) and stored alongside LLM eval scores.
+
+=== Full-text search
+
+Use the search endpoint or build a search UI on top of:
+
+[source]
+----
+GET /api/search?q=your+search+term&agent_name=my-agent&limit=50
+----
+
+Search is backed by Doris native inverted index over the full `prompt` and `completion` columns.
+When Doris is empty or unavailable, the server falls back to a GreptimeDB `LIKE` scan over the 500-character preview columns.
+
+== REST API reference
+
+All endpoints return JSON. Errors return `{"error": "..."}`.
+
+[cols="1,1,3"]
+|===
+| Method + Path | Params | Description
+
+| `GET /api/health`
+| —
+| Returns `{"status":"ok","version":"0.1.0"}`
+
+| `GET /api/stats`
+| —
+| Aggregate token counts, total cost, span count, eval score distribution
+
+| `GET /api/traces`
+| `agent_name`, `environment`, `start`, `end`, `limit`, `offset`
+| Paginated trace list
+
+| `GET /api/traces/{traceID}`
+| —
+| All spans for one trace, ordered by start time with computed depth
+
+| `GET /api/spans/{spanID}/payload`
+| `field` = `prompt` \| `completion` \| `tool_input` \| `tool_output`
+| Fetches full payload from S3 for one field
+
+| `GET /api/search`
+| `q` (required), `agent_name`, `start`, `end`, `limit`, `offset`
+| Full-text search over prompts and completions (Doris)
+
+| `GET /api/justifications`
+| `agent_name`, `limit`
+| List eval justifications from Doris
+
+| `POST /api/annotate`
+| JSON body: `span_id`, `trace_id`, `score`, `label`, `justification`
+| Submit human annotation — emits event to Kafka
+|===
+
+== Testing
+
+=== Python
+
+[source,bash]
+----
+pytest tests/python/ -v
+----
+
+All tests use mocks — no running services required.
+
+=== Go
+
+[source,bash]
+----
+make test-go
+# or: cd services && go test ./...
+----
+
+Tests in `internal/consumer`, `internal/judge`, `internal/alert`, `internal/config`, `internal/schema`, and `internal/storage` run without external dependencies.
+
+== Troubleshooting
+
+=== Events not appearing in the UI
+
+. Check that Redpanda is running: `docker compose ps`
+. Check that `consumer-greptime` is running and not in a restart loop: `docker compose logs consumer-greptime`
+. Verify the topic exists: open Redpanda Console at http://localhost:8080
+
+=== Doris initialisation takes a long time
+
+Doris FE starts slowly on first boot (~60 seconds).
+The `doris-init` container waits for readiness before creating the schema.
+Check progress with `docker compose logs doris-init`.
+
+=== Judge scores are not appearing
+
+. Confirm `consumer-judge` is running: `docker compose logs consumer-judge`
+. Check the judge model is reachable: `curl http://localhost:11434/v1/models` (for Ollama)
+. The judge only scores `llm_call` events that have no existing `eval_score`. Run batch eval to score older spans.
+
+=== Payload content shows "not available" in the UI
+
+The S3 reference key is stored in GreptimeDB but the object does not exist in MinIO.
+This can happen if `consumer-doris` or the SDK offload thread failed silently.
+Check MinIO Console at http://localhost:9001 and `docker compose logs consumer-doris`.

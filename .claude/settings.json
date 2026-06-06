@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk go *)",
+      "Bash(rtk pytest *)",
+      "Bash(gh repo *)",
+      "Bash(gh api *)",
+      "Bash(colima ssh *)",
+      "Bash(docker restart *)",
+      "Bash(python3 -c \"import cogent.sdk; print\\('SDK ok'\\)\")",
+      "Bash(bash -c 'set -a; source .env; set +a; ./bin/server')",
+      "Bash(python examples/multi_agent.py)",
+      "Bash(mysql -h 127.0.0.1 -P 4002 -u root --connect-timeout=3 -e \"SHOW TABLES;\")",
+      "Bash(mysql -h 127.0.0.1 -P 4002 -u root --connect-timeout=3 --protocol=TCP -e \"SELECT 1;\")",
+      "Bash(nc -z localhost 4000)",
+      "Bash(nc -z localhost 4002)",
+      "Bash(mysql -h 127.0.0.1 -P 4002 -u root --connect-timeout=5 --protocol=TCP -e \"SELECT 1;\")",
+      "Bash(pkill -f \"./bin/server\")",
+      "Bash(pkill -f \"./bin/consumer-greptime\")",
+      "Bash(bash -c 'set -a; source .env; set +a; ./bin/consumer-greptime')",
+      "Bash(python examples/single_agent.py)",
+      "Bash(read -r line)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import os; from dotenv import load_dotenv; load_dotenv\\(\\); print\\(os.getenv\\('BOOTSTRAP_SERVERS'\\)\\)\")",
+      "Bash(docker network *)",
+      "Bash(bash -c 'set -a; source /Users/chenglim.teo/code/cogent/.env; set +a; /Users/chenglim.teo/code/cogent/bin/consumer-greptime')",
+      "Bash(python /Users/chenglim.teo/code/cogent/examples/single_agent.py)",
+      "Bash(python /Users/chenglim.teo/code/cogent/examples/multi_agent.py)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'{len\\(d\\)} traces'\\); [print\\(f'  trace={t[\\\\\"trace_id\\\\\"][:8]} spans={t[\\\\\"span_count\\\\\"]} agent={t[\\\\\"agent_name\\\\\"]}'\\) for t in d[:5]]\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d[0], indent=2\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'{len\\(d\\)} traces'\\); [print\\(f'  trace={t[\\\\\"trace_id\\\\\"][:8]} spans={t[\\\\\"span_count\\\\\"]} agent={t[\\\\\"agent_name\\\\\"]} start={t[\\\\\"start_time\\\\\"]}'\\) for t in d[:5]]\")",
+      "Bash(python3 -c ' *)",
+      "Bash(mkdir -p /Users/chenglim.teo/code/cogent/.claude/rules)",
+      "Bash(uv tool *)",
+      "Bash(rtk pre-commit *)"
+    ],
+    "additionalDirectories": [
+      "/Users/chenglim.teo/code/cogent/.claude"
+    ]
+  }
+}

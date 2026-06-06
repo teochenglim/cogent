@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cogent — Span Detail</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="topbar-brand" href="/">⚙ Cogent</a>
+</nav>
+
+<div class="main">
+  <a class="back-link" id="back-link" href="/">← Back to trace</a>
+
+  <div class="card" id="span-meta-card">
+    <div class="card-title">Span detail</div>
+    <div id="span-meta"></div>
+  </div>
+
+  <div class="card" id="payload-card" style="display:none">
+    <div class="card-title">Payload</div>
+    <div id="payload-sections"></div>
+  </div>
+
+  <div class="card" id="eval-card" style="display:none">
+    <div class="card-title">Eval history</div>
+    <table class="data-table"><thead><tr><th>Source</th><th>Score</th><th>Label</th><th>Reason</th><th>Time</th></tr></thead>
+    <tbody id="eval-tbody"></tbody></table>
+  </div>
+
+  <div class="card" id="annot-card" style="display:none">
+    <div class="card-title">Human annotations</div>
+    <table class="data-table"><thead><tr><th>Score</th><th>Label</th><th>Justification</th><th>Time</th></tr></thead>
+    <tbody id="annot-tbody"></tbody></table>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const [spanId, traceId] = location.hash.slice(1).split(',');
+if (traceId) {
+  document.getElementById('back-link').href = 'trace.html#' + traceId;
+}
+
+async function load() {
+  const spans = await fetchJSON('/api/traces/' + traceId);
+  const span = spans.find(s => s.span_id === spanId);
+  if (!span) { document.getElementById('span-meta').textContent = 'Span not found.'; return; }
+
+  document.title = 'Cogent — ' + span.operation;
+  document.getElementById('span-meta').innerHTML = `
+    <table style="font-size:0.875rem;border-collapse:collapse">
+      ${[
+        ['Span ID',  `<span class="mono">${span.span_id}</span>`],
+        ['Trace ID', `<span class="mono">${traceId}</span>`],
+        ['Agent',    span.agent_name],
+        ['Operation',span.operation],
+        ['Model',    span.model || '—'],
+        ['Tool',     span.tool_name || '—'],
+        ['Duration', formatDuration(span.duration_ms)],
+        ['Tokens in/out', `${span.input_tokens||0} / ${span.output_tokens||0}`],
+        ['Cost',     formatCost(span.cost_usd)],
+        ['Eval score', scoreBadge(span.eval_score)],
+        ['Time',     new Date(span.start_time * 1000).toLocaleString()],
+        span.prompt_ref   ? ['Prompt S3 ref',     `<span class="mono">${span.prompt_ref}</span>`]   : null,
+        span.completion_ref ? ['Completion S3 ref', `<span class="mono">${span.completion_ref}</span>`] : null,
+      ].filter(Boolean).map(([k,v]) => `<tr><td style="padding:0.25rem 1rem 0.25rem 0;color:#718096;white-space:nowrap">${k}</td><td>${v}</td></tr>`).join('')}
+    </table>`;
+
+  const sections = [];
+  const makeSection = (label, preview, ref, field) => {
+    if (!preview && !ref) return;
+    sections.push(`
+      <div style="margin-bottom:1rem">
+        <div style="font-size:0.75rem;font-weight:600;text-transform:uppercase;color:#718096;margin-bottom:0.25rem">${label}</div>
+        <div class="preview-box" id="pc-${field}" data-preview="${(preview||'').replace(/"/g,'&quot;')}">${preview||'(no preview)'}</div>
+        ${ref ? `<button class="btn btn-outline" style="font-size:0.75rem;margin-top:0.25rem"
+          onclick="lazyLoadPayload('${spanId}','${field}',document.getElementById('pc-${field}'),this)">Load full</button>` : ''}
+      </div>`);
+  };
+  makeSection('Prompt', span.prompt_preview, span.prompt_ref, 'prompt');
+  makeSection('Completion', span.completion_preview, span.completion_ref, 'completion');
+  makeSection('Tool input', span.tool_input_preview, span.tool_input_ref, 'tool_input');
+  makeSection('Tool output', span.tool_output_preview, span.tool_output_ref, 'tool_output');
+  if (sections.length) {
+    document.getElementById('payload-sections').innerHTML = sections.join('');
+    document.getElementById('payload-card').style.display = 'block';
+  }
+}
+
+if (spanId && traceId) load().catch(e => {
+  document.getElementById('span-meta').textContent = 'Error: ' + e.message;
+});
+</script>
+</body>
+</html>

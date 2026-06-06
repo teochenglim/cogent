@@ -1,0 +1,233 @@
+services:
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092,PLAINTEXT_HOST://localhost:19092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=redpanda:8082
+      - --schema-registry-addr=0.0.0.0:8081
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+      - "8081:8081"
+      - "8082:8082"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redpanda-init:
+    image: redpandadata/redpanda:latest
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["rpk topic create cogent-telemetry --partitions 8 --replicas 1 --topic-config retention.ms=604800000 --brokers redpanda:9092 || true"]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address :9001
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: "mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin} && mc mb --ignore-existing local/cogent-payloads && mc anonymous set none local/cogent-payloads && echo 'MinIO init complete.'"
+
+  greptimedb:
+    image: greptime/greptimedb:latest
+    command: ["standalone", "start", "--http-addr=0.0.0.0:4000", "--rpc-bind-addr=0.0.0.0:4001", "--mysql-addr=0.0.0.0:4002"]
+    ports:
+      - "4000:4000"
+      - "4001:4001"
+      - "4002:4002"
+    volumes:
+      - greptimedb-data:/tmp/greptimedb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  greptimedb-init:
+    image: mysql:8.0
+    depends_on:
+      greptimedb:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mysql -h greptimedb -P 4002 -u root --connect-timeout 10 < /schema/greptime.sql && echo 'GreptimeDB schema applied.'"]
+    volumes:
+      - ./schema:/schema
+
+  doris-fe:
+    image: dyrnq/doris:4.1.1
+    hostname: doris-fe
+    privileged: true
+    environment:
+      RUN_MODE: FE
+      TZ: Asia/Singapore
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - doris-fe-data:/opt/apache-doris/fe/doris-meta
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -uroot -P9030 -h127.0.0.1 --connect-timeout=3 -e 'SELECT 1' 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  doris-be:
+    image: dyrnq/doris:4.1.1
+    hostname: doris-be
+    privileged: true
+    environment:
+      RUN_MODE: BE
+      FE_SERVERS: "fe1:doris-fe:9010"
+      BE_ADDR: "doris-be:9050"
+      TZ: Asia/Singapore
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - doris-be-data:/opt/apache-doris/be/storage
+    depends_on:
+      doris-fe:
+        condition: service_started
+
+  doris-init:
+    image: mysql:8.0
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+      doris-be:
+        condition: service_started
+    volumes:
+      - ./scripts:/scripts
+      - ./schema:/schema
+    entrypoint: ["/bin/sh", "/scripts/doris-init.sh"]
+
+  consumer-greptime:
+    build:
+      context: ../services
+      dockerfile: Dockerfile
+    command: ["/consumer-greptime"]
+    depends_on:
+      - redpanda-init
+      - greptimedb-init
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GREPTIME_HOST: greptimedb
+
+  consumer-doris:
+    build:
+      context: ../services
+      dockerfile: Dockerfile
+    command: ["/consumer-doris"]
+    depends_on:
+      - redpanda-init
+      - doris-init
+      - minio-init
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      DORIS_FE_HOST: doris-fe
+      MINIO_ENDPOINT: minio:9000
+
+  consumer-judge:
+    build:
+      context: ../services
+      dockerfile: Dockerfile
+    command: ["/consumer-judge"]
+    depends_on:
+      - redpanda-init
+      - minio-init
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      MINIO_ENDPOINT: minio:9000
+
+  consumer-alerting:
+    build:
+      context: ../services
+      dockerfile: Dockerfile
+    command: ["/consumer-alerting"]
+    depends_on:
+      - redpanda-init
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+
+  server:
+    build:
+      context: ../services
+      dockerfile: Dockerfile
+    command: ["/server"]
+    ports:
+      - "8090:8090"
+    depends_on:
+      - redpanda-init
+      - greptimedb-init
+      - doris-init
+      - minio-init
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GREPTIME_HOST: greptimedb
+      DORIS_FE_HOST: doris-fe
+      MINIO_ENDPOINT: minio:9000
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - greptimedb
+      - doris-init
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+
+volumes:
+  redpanda-data:
+  minio-data:
+  greptimedb-data:
+  doris-fe-data:
+  doris-be-data:

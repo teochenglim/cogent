@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cogent — Trace List</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="topbar-brand" href="/">⚙ Cogent</a>
+  <form id="search-form" style="display:flex;gap:0.5rem;align-items:center">
+    <input type="text" id="search-input" placeholder="Search prompts and completions..." style="width:320px">
+    <button type="submit" class="btn btn-primary">Search</button>
+  </form>
+  <select id="agent-filter">
+    <option value="">All agents</option>
+  </select>
+  <div class="topbar-spacer"></div>
+</nav>
+
+<div class="stats-strip" id="stats-strip">
+  <div class="stat-item"><span class="stat-label">Traces today</span><span class="stat-value" id="stat-traces">—</span></div>
+  <div class="stat-item"><span class="stat-label">Cost today</span><span class="stat-value" id="stat-cost">—</span></div>
+  <div class="stat-item"><span class="stat-label">Avg eval score</span><span class="stat-value" id="stat-score">—</span></div>
+  <div class="stat-item"><span class="stat-label">Active agents</span><span class="stat-value" id="stat-agents">—</span></div>
+</div>
+
+<div class="main">
+  <div id="search-results" style="display:none">
+    <h3 style="margin-bottom:0.75rem">Search results</h3>
+    <table class="data-table" id="search-table">
+      <thead><tr><th>Trace ID</th><th>Agent</th><th>Prompt</th><th>Completion</th><th>Score</th><th>Time</th></tr></thead>
+      <tbody id="search-tbody"></tbody>
+    </table>
+    <div style="margin-bottom:1.5rem"></div>
+  </div>
+
+  <h3 style="margin-bottom:0.75rem">Recent traces</h3>
+  <table class="data-table" id="traces-table">
+    <thead><tr><th>Trace ID</th><th>Agent</th><th>Spans</th><th>Cost</th><th>Avg score</th><th>Max span</th><th>Duration</th><th>When</th></tr></thead>
+    <tbody id="traces-tbody"></tbody>
+  </table>
+  <div class="pagination">
+    <button class="btn btn-outline" id="btn-prev" onclick="changePage(-1)">← Prev</button>
+    <span id="page-info" style="font-size:0.875rem;color:#718096"></span>
+    <button class="btn btn-outline" id="btn-next" onclick="changePage(1)">Next →</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+let currentOffset = 0;
+const LIMIT = 50;
+let agentFilter = '';
+
+async function loadStats() {
+  try {
+    const stats = await fetchJSON('/api/stats');
+    document.getElementById('stat-traces').textContent = stats.total_traces_today ?? '0';
+    document.getElementById('stat-cost').textContent = formatCost(stats.total_cost_today_usd);
+    document.getElementById('stat-score').textContent = stats.avg_eval_score != null ? stats.avg_eval_score.toFixed(2) : '—';
+    document.getElementById('stat-agents').textContent = stats.active_agents ?? '0';
+  } catch(e) { console.warn('stats error', e); }
+}
+
+async function loadTraces() {
+  const params = new URLSearchParams({ limit: LIMIT, offset: currentOffset });
+  if (agentFilter) params.set('agent_name', agentFilter);
+  try {
+    const traces = await fetchJSON('/api/traces?' + params);
+    const tbody = document.getElementById('traces-tbody');
+    tbody.innerHTML = traces.map(t => `
+      <tr class="clickable" onclick="location.href='trace.html#${t.trace_id}'">
+        <td class="mono">${t.trace_id.slice(0,8)}…</td>
+        <td>${t.agent_name}</td>
+        <td>${t.span_count}</td>
+        <td>${formatCost(t.total_cost_usd)}</td>
+        <td>${scoreBadge(t.avg_eval_score)}</td>
+        <td>${formatBytes(t.max_span_size_bytes)}</td>
+        <td>${formatDuration(t.duration_ms)}</td>
+        <td>${timeAgo(t.start_time)}</td>
+      </tr>`).join('');
+    document.getElementById('page-info').textContent =
+      `${currentOffset + 1}–${currentOffset + traces.length}`;
+    document.getElementById('btn-prev').disabled = currentOffset === 0;
+    document.getElementById('btn-next').disabled = traces.length < LIMIT;
+
+    // Populate agent filter
+    const select = document.getElementById('agent-filter');
+    const agents = [...new Set(traces.map(t => t.agent_name))];
+    agents.forEach(a => {
+      if (!select.querySelector(`option[value="${a}"]`)) {
+        const opt = document.createElement('option');
+        opt.value = a; opt.textContent = a;
+        select.appendChild(opt);
+      }
+    });
+  } catch(e) { document.getElementById('traces-tbody').innerHTML = '<tr><td colspan="8">Error loading traces: ' + e.message + '</td></tr>'; }
+}
+
+function changePage(dir) {
+  currentOffset = Math.max(0, currentOffset + dir * LIMIT);
+  loadTraces();
+}
+
+document.getElementById('agent-filter').onchange = e => {
+  agentFilter = e.target.value;
+  currentOffset = 0;
+  loadTraces();
+};
+
+document.getElementById('search-form').onsubmit = async e => {
+  e.preventDefault();
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) { document.getElementById('search-results').style.display = 'none'; return; }
+  try {
+    const results = await fetchJSON('/api/search?q=' + encodeURIComponent(q));
+    const tbody = document.getElementById('search-tbody');
+    tbody.innerHTML = results.map(r => `
+      <tr class="clickable" onclick="location.href='trace.html#${r.trace_id}'">
+        <td class="mono">${r.trace_id.slice(0,8)}…</td>
+        <td>${r.agent_name}</td>
+        <td class="mono">${truncate(r.prompt_preview, 60)}</td>
+        <td class="mono">${truncate(r.completion_preview, 60)}</td>
+        <td>${scoreBadge(r.eval_score)}</td>
+        <td>${timeAgo(r.start_time)}</td>
+      </tr>`).join('');
+    document.getElementById('search-results').style.display = 'block';
+  } catch(e) { alert('Search error: ' + e.message); }
+};
+
+loadStats();
+loadTraces();
+setInterval(() => { loadStats(); loadTraces(); }, 30000);
+</script>
+</body>
+</html>

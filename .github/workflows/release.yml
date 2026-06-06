@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.22'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ── gate: tests must pass before anything ships ────────────────────────────
+
+  test-go:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: services/go.sum
+      - run: cd services && go test ./...
+
+  test-python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install -e ".[sdk,dev]"
+      - run: pytest tests/python/ -v
+
+  # ── Go binary matrix ────────────────────────────────────────────────────────
+  #
+  # Builds all 6 binaries for each OS/arch pair in a single job.
+  # Artifact per matrix cell: cogent-<tag>-<goos>-<goarch>.tar.gz
+
+  build-go:
+    name: Build Go — ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: test-go
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: services/go.sum
+
+      - name: Build all binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          EXT=""
+          [ "$GOOS" = "windows" ] && EXT=".exe"
+          mkdir -p dist/build
+
+          for bin in consumer-greptime consumer-doris consumer-judge consumer-alerting server eval; do
+            cd services
+            go build -o ../dist/build/${bin}${EXT} ./cmd/${bin}
+            cd ..
+          done
+
+          ARCHIVE="cogent-${VERSION}-${GOOS}-${GOARCH}.tar.gz"
+          tar -czf "${ARCHIVE}" -C dist/build .
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  # ── Python: build wheel + sdist, publish to PyPI ───────────────────────────
+  #
+  # Requires secret PYPI_API_TOKEN in repo settings → Actions secrets.
+  # Set environment: pypi in repo settings to scope the secret.
+
+  publish-python:
+    name: Publish to PyPI
+    needs: test-python
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build
+        run: |
+          pip install build twine
+          python -m build
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*
+
+  # ── GitHub Release: collect all Go tarballs, attach to release ─────────────
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-go, publish-python]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: go-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*.tar.gz

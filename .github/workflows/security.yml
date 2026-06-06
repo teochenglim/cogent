@@ -1,0 +1,77 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # weekly Monday 6 AM UTC
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to GitHub Security tab
+
+jobs:
+  # ── Semgrep SAST ────────────────────────────────────────────────────────────
+  #
+  # Scans for SQL injection, OWASP Top 10, secrets, Python + Go security issues.
+  # SEMGREP_APP_TOKEN is optional — set it in repo secrets to push results to
+  # the Semgrep Cloud dashboard. Without it, findings are printed to the log.
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan
+        run: |
+          semgrep scan \
+            --config p/golang \
+            --config p/python \
+            --config p/sql-injection \
+            --config p/secrets \
+            --config p/owasp-top-ten \
+            --sarif \
+            --output semgrep.sarif \
+            --error
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ── Trivy — dependency + filesystem vulnerability scan ─────────────────────
+  #
+  # Scans Go modules, Python packages, and repo files for known CVEs.
+  # Fails on CRITICAL or HIGH findings.
+
+  trivy:
+    name: Trivy scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan filesystem
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy

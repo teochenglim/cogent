@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cogent — Trace</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<nav class="topbar">
+  <a class="topbar-brand" href="/">⚙ Cogent</a>
+  <span style="color:rgba(255,255,255,0.6);font-size:0.875rem" id="topbar-trace-id"></span>
+</nav>
+
+<div class="main">
+  <a class="back-link" href="/">← All traces</a>
+  <div id="trace-meta" style="margin-bottom:1rem;font-size:0.875rem;color:#718096"></div>
+  <table class="data-table" id="spans-table">
+    <thead><tr><th>Operation</th><th>Agent</th><th>Model/Tool</th><th>Duration</th><th>Tokens</th><th>Cost</th><th>Size</th><th>Score</th><th>Time</th><th></th></tr></thead>
+    <tbody id="spans-tbody"></tbody>
+  </table>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+const traceId = location.hash.slice(1);
+if (!traceId) { document.getElementById('spans-tbody').innerHTML = '<tr><td colspan="10">No trace ID in URL hash.</td></tr>'; }
+
+document.getElementById('topbar-trace-id').textContent = traceId;
+
+async function loadTrace() {
+  const spans = await fetchJSON('/api/traces/' + traceId);
+  document.getElementById('trace-meta').textContent =
+    `${spans.length} span${spans.length !== 1 ? 's' : ''}`;
+
+  const tbody = document.getElementById('spans-tbody');
+  tbody.innerHTML = '';
+
+  spans.forEach((span, i) => {
+    const indent = span.depth * 16;
+    const isError = !!span.tool_error;
+    const tokens = (span.input_tokens || 0) + (span.output_tokens || 0);
+    const size = (span.prompt_size_bytes || 0) + (span.completion_size_bytes || 0);
+    const modelOrTool = span.tool_name || span.model || '—';
+
+    const row = document.createElement('tr');
+    row.className = 'clickable' + (isError ? ' error-row' : '');
+    row.dataset.spanIdx = i;
+    row.innerHTML = `
+      <td>
+        <div class="depth-indent" style="padding-left:${indent}px">
+          ${span.depth > 0 ? `<div class="depth-bar" style="height:18px"></div>` : ''}
+          <span>${span.operation}</span>
+        </div>
+      </td>
+      <td>${span.agent_name}</td>
+      <td class="mono" style="max-width:140px;overflow:hidden;text-overflow:ellipsis">${modelOrTool}</td>
+      <td>${formatDuration(span.duration_ms)}</td>
+      <td>${tokens || '—'}</td>
+      <td>${formatCost(span.cost_usd)}</td>
+      <td>${formatBytes(size)}</td>
+      <td>${scoreBadge(span.eval_score)}</td>
+      <td>${timeAgo(span.start_time)}</td>
+      <td>
+        ${span.operation === 'llm_call'
+          ? `<a href="annotate.html#${span.span_id},${traceId}" class="btn btn-outline" style="font-size:0.75rem;padding:0.25rem 0.5rem">Annotate</a>`
+          : ''}
+      </td>`;
+
+    const detail = document.createElement('tr');
+    detail.id = 'detail-' + i;
+    const hasPrompt = span.prompt_preview || span.prompt_ref;
+    const hasCompletion = span.completion_preview || span.completion_ref;
+    const hasToolIn = span.tool_input_preview || span.tool_input_ref;
+    const hasToolOut = span.tool_output_preview || span.tool_output_ref;
+
+    let detailHTML = '<td colspan="10"><div class="span-detail" id="detail-inner-' + i + '">';
+    if (isError) {
+      detailHTML += `<div class="alert-error" style="margin-bottom:0.75rem">Error: ${span.tool_error}</div>`;
+    }
+    const makePayloadBlock = (label, preview, ref, field) => {
+      if (!preview && !ref) return '';
+      return `
+        <div style="margin-bottom:0.75rem">
+          <div style="font-size:0.75rem;font-weight:600;text-transform:uppercase;color:#718096;margin-bottom:0.25rem">${label}</div>
+          <div class="preview-box" id="content-${i}-${field}" data-preview="${(preview||'').replace(/"/g,'&quot;')}">${preview || '(no preview)'}</div>
+          ${ref ? `<button class="btn btn-outline" style="font-size:0.75rem;margin-top:0.25rem"
+            onclick="lazyLoadPayload('${span.span_id}','${field}',document.getElementById('content-${i}-${field}'),this)">Load full</button>` : ''}
+        </div>`;
+    };
+    detailHTML += makePayloadBlock('Prompt', span.prompt_preview, span.prompt_ref, 'prompt');
+    detailHTML += makePayloadBlock('Completion', span.completion_preview, span.completion_ref, 'completion');
+    detailHTML += makePayloadBlock('Tool input', span.tool_input_preview, span.tool_input_ref, 'tool_input');
+    detailHTML += makePayloadBlock('Tool output', span.tool_output_preview, span.tool_output_ref, 'tool_output');
+    detailHTML += '</div></td>';
+    detail.innerHTML = detailHTML;
+
+    const hasDetail = hasPrompt || hasCompletion || hasToolIn || hasToolOut || isError;
+    if (hasDetail) {
+      row.onclick = () => {
+        const inner = document.getElementById('detail-inner-' + i);
+        inner.classList.toggle('open');
+      };
+    }
+
+    tbody.appendChild(row);
+    if (hasDetail) tbody.appendChild(detail);
+  });
+}
+
+if (traceId) loadTrace().catch(e => {
+  document.getElementById('spans-tbody').innerHTML = '<tr><td colspan="10">Error: ' + e.message + '</td></tr>';
+});
+</script>
+</body>
+</html>

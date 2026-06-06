@@ -1,0 +1,21 @@
+apiVersion: 1
+datasources:
+  - name: GreptimeDB
+    type: mysql
+    url: greptimedb:4002
+    database: public
+    user: root
+    jsonData:
+      maxOpenConns: 10
+      maxIdleConns: 10
+    editable: false
+
+  - name: Doris
+    type: mysql
+    url: doris-fe:9030
+    database: cogent
+    user: root
+    jsonData:
+      maxOpenConns: 10
+      maxIdleConns: 10
+    editable: false

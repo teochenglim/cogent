@@ -1,0 +1,160 @@
+{
+  "title": "Cogent Overview",
+  "uid": "cogent-overview",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "agent_name",
+        "type": "query",
+        "datasource": "GreptimeDB",
+        "query": "SELECT DISTINCT agent_name FROM agent_telemetry ORDER BY agent_name",
+        "includeAll": true,
+        "allValue": ".*",
+        "label": "Agent"
+      },
+      {
+        "name": "trace_id",
+        "type": "textbox",
+        "label": "Trace ID"
+      },
+      {
+        "name": "search_term",
+        "type": "textbox",
+        "label": "Search"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total cost today by agent",
+      "type": "barchart",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT agent_name, SUM(cost_usd) as total_cost FROM agent_telemetry WHERE ts >= NOW() - INTERVAL '1 DAY' GROUP BY agent_name ORDER BY total_cost DESC",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "Token usage over time by model",
+      "type": "timeseries",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('hour', ts) as time, model, SUM(input_tokens + output_tokens) as tokens FROM agent_telemetry WHERE model IS NOT NULL GROUP BY time, model ORDER BY time",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "Avg eval score by agent (24h)",
+      "type": "stat",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT agent_name, AVG(eval_score) as avg_score FROM agent_telemetry WHERE ts >= NOW() - INTERVAL '1 DAY' AND eval_score IS NOT NULL GROUP BY agent_name",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "title": "P95 duration_ms by operation",
+      "type": "timeseries",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('hour', ts) as time, operation, percentile_approx(duration_ms, 0.95) as p95 FROM agent_telemetry GROUP BY time, operation ORDER BY time",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "Tool error rate",
+      "type": "barchart",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT agent_name, COUNT(CASE WHEN tool_error IS NOT NULL THEN 1 END) * 100.0 / COUNT(*) as error_rate FROM agent_telemetry WHERE operation = 'tool_call' GROUP BY agent_name",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+    },
+    {
+      "id": 6,
+      "title": "Payload size trend",
+      "type": "timeseries",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT date_trunc('hour', ts) as time, AVG(prompt_size_bytes) as avg_prompt, AVG(completion_size_bytes) as avg_completion FROM agent_telemetry GROUP BY time ORDER BY time",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+    },
+    {
+      "id": 7,
+      "title": "Active traces",
+      "type": "table",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT trace_id, agent_name, COUNT(*) as spans, SUM(cost_usd) as total_cost, AVG(eval_score) as avg_score, MAX(prompt_size_bytes + completion_size_bytes) as max_span_bytes, MAX(ts) as last_seen FROM agent_telemetry WHERE ts >= NOW() - INTERVAL '1 DAY' GROUP BY trace_id, agent_name ORDER BY last_seen DESC LIMIT 50",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24}
+    },
+    {
+      "id": 8,
+      "title": "Span timeline for $trace_id",
+      "type": "table",
+      "datasource": "GreptimeDB",
+      "targets": [
+        {
+          "rawSql": "SELECT span_id, parent_span_id, operation, agent_name, model, tool_name, duration_ms, input_tokens + output_tokens as tokens, cost_usd, prompt_size_bytes + completion_size_bytes as span_bytes, eval_score, ts FROM agent_telemetry WHERE trace_id = '$trace_id' ORDER BY ts",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32}
+    },
+    {
+      "id": 9,
+      "title": "Full-text search ($search_term)",
+      "type": "table",
+      "datasource": "Doris",
+      "targets": [
+        {
+          "rawSql": "SELECT trace_id, span_id, agent_name, start_time, prompt_preview, completion_preview, eval_score FROM agent_telemetry WHERE MATCH_ALL(prompt, '$search_term') OR MATCH_ALL(completion, '$search_term') ORDER BY start_time DESC LIMIT 50",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 40}
+    },
+    {
+      "id": 10,
+      "title": "Cogent UI",
+      "type": "text",
+      "options": {
+        "content": "**[Open Cogent UI](http://localhost:8090)**\n\nFull trace viewer, span detail, and human annotation form.",
+        "mode": "markdown"
+      },
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 48}
+    }
+  ]
+}
