@@ -103,7 +103,6 @@ jobs:
     name: Publish to PyPI
     needs: test-python
     runs-on: ubuntu-latest
-    environment: pypi
     steps:
       - uses: actions/checkout@v4
 

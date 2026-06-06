@@ -176,7 +176,7 @@ release: ## Bump, commit, tag, push — triggers GitHub Actions  (VERSION=x.y.z 
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make release VERSION=x.y.z"; exit 1; fi
 	$(MAKE) bump VERSION=$(VERSION)
 	git add pyproject.toml
-	git commit -m "chore: release v$(VERSION)"
+	git diff --cached --quiet || git commit -m "chore: release v$(VERSION)"
 	git tag v$(VERSION)
 	git push origin HEAD
 	git push origin v$(VERSION)

@@ -33,7 +33,7 @@ func (m *mockHandler) Flush(_ context.Context) error {
 
 func TestBaseConsumer_DSN(t *testing.T) {
 	got := consumer.DSN("root", "pass", "localhost", 4002, "public")
-	want := "root:pass@tcp(localhost:4002)/public?parseTime=true"
+	want := "root:pass@tcp(localhost:4002)/public?parseTime=true&interpolateParams=true"
 	if got != want {
 		t.Errorf("DSN() = %q, want %q", got, want)
 	}
