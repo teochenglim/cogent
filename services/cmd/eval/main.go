@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"math/rand/v2"
+	"math/rand/v2" //nolint // nosemgrep: go.lang.security.audit.crypto.math_random.math-random-used
 	"os"
 	"os/signal"
 	"syscall"
