@@ -40,7 +40,8 @@
       "Bash(grep -v \"^\\\\-\\\\-$\")",
       "Bash(docker run *)",
       "Bash(grep -v \"^$\")",
-      "Bash(grep -v \"^\\\\s*$\")"
+      "Bash(grep -v \"^\\\\s*$\")",
+      "Bash(grep -v \"MiB\\\\|p/s\\\\|ETA\\\\|Downloading\\\\|INFO\\\\|Pulling\\\\|complete\\\\|Pull\\\\|Digest\\\\|Status\\\\|Downloaded\\\\|^\\\\s*$\")"
     ],
     "additionalDirectories": [
       "/Users/chenglim.teo/code/cogent/.claude"
