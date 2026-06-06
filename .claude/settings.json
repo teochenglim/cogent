@@ -32,7 +32,14 @@
       "Bash(python3 -c ' *)",
       "Bash(mkdir -p /Users/chenglim.teo/code/cogent/.claude/rules)",
       "Bash(uv tool *)",
-      "Bash(rtk pre-commit *)"
+      "Bash(rtk pre-commit *)",
+      "Bash(rtk gh *)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(python3 -c \"import json,sys; jobs=json.load\\(sys.stdin\\)['jobs']; [print\\(j['name'], j['conclusion'], [\\(s['name'],s['conclusion']\\) for s in j['steps'] if s['conclusion']=='failure']\\) for j in jobs]\")",
+      "Bash(python3 -c \"import json,sys; r=json.load\\(sys.stdin\\); print\\(r['tag_name']\\)\")",
+      "Bash(grep -v \"^\\\\-\\\\-$\")",
+      "Bash(docker run *)",
+      "Bash(grep -v \"^$\")"
     ],
     "additionalDirectories": [
       "/Users/chenglim.teo/code/cogent/.claude"

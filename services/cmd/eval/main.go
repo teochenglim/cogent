@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"os/signal"
 	"syscall"
