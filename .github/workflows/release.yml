@@ -119,7 +119,7 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        run: twine upload --verbose dist/*
 
   # ── GitHub Release: collect all Go tarballs, attach to release ─────────────
 

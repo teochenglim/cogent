@@ -27,7 +27,7 @@ make up
 Then send some traces:
 
 ```bash
-pip install -e ".[sdk]"
+pip install cogent-sdk
 python examples/single_agent.py
 python examples/multi_agent.py
 ```

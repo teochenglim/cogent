@@ -97,14 +97,14 @@ Wait about 30 seconds for Doris to finish initialising, then:
 
 [source,bash]
 ----
-pip install -e ".[sdk]"
+pip install cogent-sdk
 ----
 
 For development (includes test dependencies):
 
 [source,bash]
 ----
-pip install -e ".[sdk,dev]"
+pip install -e ".[sdk,dev]"   # from repo root
 ----
 
 === Building Go binaries from source
