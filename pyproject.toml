@@ -1,6 +1,6 @@
 [project]
 name = "cogent-sdk"
-version = "0.1.9"
+version = "0.1.10"
 description = "Stream-first observability for distributed LLM agents"
 requires-python = ">=3.11"
 
