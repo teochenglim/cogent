@@ -1,9 +1,11 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.claude/settings.json
 dist/
 build/
 .venv/
+.serena/
 venv/
 .env
 bin/
