@@ -16,6 +16,7 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
         run-consumer-judge run-consumer-alerting \
         eval-dry \
         pre-commit-install pre-commit-run \
+        github-action-bump \
         version bump tag release
 
 # ── help ───────────────────────────────────────────────────────────────────
@@ -153,6 +154,17 @@ pre-commit-install: ## Install pre-commit hooks into .git/hooks
 
 pre-commit-run: ## Run all pre-commit hooks against all files
 	pre-commit run --all-files
+
+# ── ci ───────────────────────────────────────────────────────────────────────
+
+.PHONY: github-action-bump
+github-action-bump: ## Pin .github/workflows/*.yml actions to latest release, full commit SHA (uses pinact)
+	@# Unauthenticated GitHub API calls are capped at 60/hour and this touches
+	@# ~10 actions x (list tags + verify); export GITHUB_TOKEN to raise that limit.
+	go run github.com/suzuki-shunsuke/pinact/cmd/pinact@latest run --update
+	go run github.com/suzuki-shunsuke/pinact/cmd/pinact@latest run --verify
+	@echo "Actions bumped and verified. Review the diff (check .pinact.yaml's ignore_actions"
+	@echo "weren't silently downgraded), then run 'make test-go test-python' and re-check semgrep before committing."
 
 # ── version control ────────────────────────────────────────────────────────
 
