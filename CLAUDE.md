@@ -38,3 +38,9 @@ make release VERSION=x.y.z  # bump + commit + tag + push
 | [`sdk.md`](.claude/rules/sdk.md) | Schema sync contract, payload offload, trace ID propagation, Kafka flush |
 | [`judge.md`](.claude/rules/judge.md) | What gets scored, prompt template vars, required JSON keys, config precedence |
 | [`server.md`](.claude/rules/server.md) | Single binary + embedded UI, json tags, annotation Kafka flow, server struct |
+
+## Git / release workflow
+
+- **Never run `git commit`, `git tag`, or `git push` yourself.** Make the file changes, run the tests, and stop — the user commits and releases.
+- CVE bump flow: `cd services && go get <module>@<fixed-version> && go mod tidy`, then `go build ./... && go test ./...`. Leave `go.mod`/`go.sum` uncommitted.
+- Releasing is the user's step: `make release VERSION=x.y.z` (bump + commit + tag + push, triggers GitHub Actions).
